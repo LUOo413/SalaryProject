@@ -22,6 +22,7 @@
 
 使用方式（需先安裝：pip install openpyxl xlrd）
   雙擊或執行  python 清冊共用.py → 左上角選客戶，按「產生」
+  或用「啟動.py」打包成的 exe：exe 只轉一次，以後改程式只要換這個 .py 和客戶模組
   指令：python 清冊共用.py 客戶名稱 [輸出資料夾]（用該客戶存好的設定）
   每個客戶的設定存在「客戶設定」資料夾（一個客戶一個 .json）
 
@@ -768,6 +769,9 @@ class 樣板:
                             加(r0 + self.角色[角], self.欄[中文月[月 - 1]], v[鍵])
                 if 月 and v["總額"] and ("獎:" + 欄名) in self.角色:   # 獎金自己那一列：放在選的月份
                     加(r0 + self.角色["獎:" + 欄名], self.欄[中文月[月 - 1]], v["總額"])
+                for 列名, 金 in v.get("列", {}).items():          # 額外列（例如伙食費）：放在自己那一列、同一欄
+                    if ("獎:" + 列名) in self.角色 and (金 or not 零不填):
+                        寫(ws, r0 + self.角色["獎:" + 列名], c, 金)
 
 
 
@@ -905,6 +909,8 @@ def 科目分類檔(src, out, 表們, 對照, 分組, 名科目, 未分類, 警�
 }
 
 def 程式資料夾():
+    if os.environ.get("PAYROLL_APP_DIR"):          # 用「啟動.py」打包的 exe 打開時，它會告訴我們資料夾
+        return os.environ["PAYROLL_APP_DIR"]
     return os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 
 
@@ -1165,8 +1171,8 @@ def 類別歸類(x):
 #   先用身分證號對，對不到再用姓名對
 def 前年度核對(今年, 前年, 比地址=True):
     結果 = OrderedDict((k, []) for k in ("同身分證、名字不同", "同名字、身分證不同", "客戶資料有缺",
-                                        "所得類別不同", "地址不同", "名冊找不到", "名冊有、清冊沒有",
-                                        "名冊上是其他所得"))
+                                        "所得類別不同", "地址不同", "名冊找不到", "用客戶資料填寫",
+                                        "名冊有、清冊沒有", "名冊上是其他所得"))
     依證 = {v["身分證號"]: n for n, v in 前年.items() if v.get("身分證號")}
     對到, 新人 = set(), []
     for n, info, 今類 in 今年:
@@ -1215,88 +1221,128 @@ def 前年度核對(今年, 前年, 比地址=True):
     return 結果
 
 
-# 寫人員名冊核對工作表：上面一張「摘要」（每類幾人），下面一張明細表（可以用篩選只看某一類）
-def 寫前年度核對(wbo, 結果, 路徑, 人數):
+# 寫人員名冊核對工作表：分區塊的待辦清單，只列要看的人
+#   最上面一句話：清冊幾人、幾人沒問題、幾人要看
+#   下面每一種問題一區（有才列）：名冊找不到、名字不一樣、身分證不一樣、地址不一樣、所得類別不一樣、
+#   名冊缺資料改用客戶的、兩邊都沒有（清冊空白）、名冊有清冊沒有、名冊上是其他所得
+def 寫前年度核對(wbo, 結果, 路徑, 人數, 人列們=None):
     from openpyxl.styles import Alignment, Border, Side
     ws = wbo.create_sheet("人員名冊核對")
     ws.sheet_view.showGridLines = False
-    說明 = OrderedDict([
-        ("同身分證、名字不同", "身分證號一樣、名字不一樣：可能改名或打錯字"),
-        ("同名字、身分證不同", "名字一樣、身分證號不一樣：客戶可能打錯，或同名不同人"),
-        ("所得類別不同", "名冊上的所得類別跟清冊放的工作表（薪資／執行業務）不一樣"),
-        ("地址不同", "兩邊都有地址但不一樣（全形／半形數字、臺／台視為一樣）"),
-        ("客戶資料有缺", "客戶沒有身分證號或地址，名冊有"),
-        ("名冊找不到", "人員名冊沒有這個人：清冊上他的基本資料用客戶的，請確認"),
-        ("名冊有、清冊沒有", "名冊上是薪資或執行業務，但今年清冊沒有：可能離職或名字寫法不同"),
-        ("名冊上是其他所得", "其他所得、受贈、中獎這類，本來就不在印領清冊"),
-    ])
-    重要 = {"同身分證、名字不同", "同名字、身分證不同", "所得類別不同", "名冊找不到"}
-    奶茶, 淡奶茶, 橘, 灰字 = "D7B89F", "F6EEE4", "FCE4D0", "A69486"
+    人列們 = 人列們 or []
+    奶茶, 淡奶茶, 區底, 灰字, 深字 = "C49A7C", "FBF6EE", "F3E8DA", "A69486", "5A4636"
+    橘字, 紅字, 綠字 = "9A5B12", "A63D33", "4E7A3E"
     細 = Side(style="thin", color="E2D3C3")
     框 = Border(left=細, right=細, top=細, bottom=細)
-    置中 = Alignment(horizontal="center", vertical="center")
-    換行 = Alignment(vertical="center", wrap_text=True)
-    for col, w in zip("ABCDE", (20, 11, 34, 34, 46)):
+    靠左 = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    置中 = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    寬們 = (14, 14, 14, 24, 24, 24)                      # A～F
+    for col, w in zip("ABCDEF", 寬們):
         ws.column_dimensions[col].width = w
+    最後欄 = len(寬們)
 
-    # 標題
+    # ---- 整理每一區要列的東西
+    依名 = {x["名"]: x for x in 人列們}
+    相近 = {列[0]: 列[3] for 列 in 結果.get("名冊找不到", []) if 列[3]}
+    區們 = []          # (標題, 一句說明, 顏色, 欄們[(標題, 佔幾欄)], 列們)
+
+    找不到 = [x for x in 人列們 if not x["找到"]]
+    if 找不到:
+        區們.append(("名冊找不到", "清冊用客戶的資料，請確認是不是新人、或名字寫法不同", 紅字,
+                   [("姓名", 1), ("編號", 1), ("身分證號", 1), ("地址", 2), ("備註", 1)],
+                   [[x["名"], x["欄"].get("編號", (None,))[0], x["欄"].get("身分證號", (None,))[0],
+                     x["欄"].get("地址", (None,))[0], 相近.get(x["名"], "")] for x in 找不到]))
+    for 類, 標題, 說, 色 in (("同身分證、名字不同", "名字不一樣", "身分證號一樣、名字不一樣：可能改名或打錯字", 紅字),
+                          ("同名字、身分證不同", "身分證不一樣", "清冊用名冊的；客戶可能打錯，或同名不同人", 紅字),
+                          ("地址不同", "地址不一樣", "清冊用名冊的（全形／半形、臺／台已經當成一樣）", 橘字)):
+        列們_ = 結果.get(類, [])
+        if 列們_:
+            區們.append((標題, 說, 色, [("姓名", 1), ("客戶寫的", 2), ("名冊上的（清冊用這個）", 3)],
+                       [[列[0], 列[1], 列[2]] for 列 in 列們_]))
+    if 結果.get("所得類別不同"):
+        區們.append(("所得類別不一樣", "名冊上的所得類別跟清冊放的地方不一樣", 紅字,
+                   [("姓名", 1), ("清冊放在", 1), ("名冊上的類別", 1), ("說明", 3)],
+                   [[列[0], 列[1], 列[2], 列[3]] for 列 in 結果["所得類別不同"]]))
+    缺 = [(x["名"], 鍵, v) for x in 人列們 if x["找到"] for 鍵, (v, 來) in x["欄"].items() if 來 == "客戶"]
+    if 缺:
+        區們.append(("名冊上缺資料，改用客戶的", "名冊上有這個人，但這一欄空白，清冊填客戶的", 橘字,
+                   [("姓名", 1), ("哪一欄", 1), ("填進清冊的值（客戶的）", 4)], [list(t) for t in 缺]))
+    空白 = OrderedDict()
+    for x in 人列們:
+        for 鍵 in ("身分證號", "地址"):
+            if x["欄"].get(鍵, (None, ""))[1] == "空白":
+                空白.setdefault(鍵, []).append(x["名"])
+    if 空白:
+        列們_ = []
+        for 鍵, 名們 in 空白.items():
+            for k in range(0, len(名們), 12):            # 名字排成一串，一列 12 個
+                列們_.append([f"{鍵}（{len(名們)} 人）" if k == 0 else "", "、".join(名們[k:k + 12])])
+        區們.append(("名冊、客戶都沒有，清冊空白", "要另外補資料", 紅字, [("哪一欄", 1), ("姓名", 5)], 列們_))
+    要看 = {x["名"] for x in 找不到} | {列[0] for 類 in ("同身分證、名字不同", "同名字、身分證不同", "地址不同", "所得類別不同")
+                                    for 列 in 結果.get(類, [])} | {t[0] for t in 缺} | {n for v in 空白.values() for n in v}
+    外 = 結果.get("名冊有、清冊沒有", [])
+    if 外:
+        區們.append(("名冊有、清冊沒有", "名冊上是薪資或執行業務，但今年清冊沒有：可能離職，或名字寫法不同", 灰字,
+                   [("姓名", 1), ("名冊上的資料", 2), ("說明", 3)], [[列[0], 列[2], 列[3]] for 列 in 外]))
+    其他 = 結果.get("名冊上是其他所得", [])
+    if 其他:
+        區們.append(("名冊上是其他所得", "其他所得、受贈、中獎這類，本來就不在印領清冊，看看就好", 灰字,
+                   [("姓名", 1), ("名冊上的類別", 2), ("說明", 3)], [[列[0], 列[2], 列[3]] for 列 in 其他]))
+
+    # ---- 標題、一句話摘要
     ws["A1"] = "人員名冊核對"
-    ws["A1"].font = Font(size=15, bold=True, color="5A4636")
-    ws["A2"] = (f"人員名冊：{os.path.basename(路徑)}（{人數} 人）｜清冊的編號、身分證號、地址以人員名冊為準，"
-                f"「客戶資料」是客戶薪資名冊上寫的")
+    ws["A1"].font = Font(size=16, bold=True, color=深字)
+    ws["A2"] = f"人員名冊：{os.path.basename(路徑)}（{人數} 人）｜清冊的編號、身分證號、地址以人員名冊為準，名冊沒有的才用客戶的"
     ws["A2"].font = Font(size=10, color=灰字)
+    沒問題 = len([x for x in 人列們 if x["名"] not in 要看])
+    ws["A4"] = (f"清冊 {len(人列們)} 人：✓ {沒問題} 人沒問題" + (f"，下面 {len(要看)} 人要看" if 要看 else "，全部一致"))
+    ws["A4"].font = Font(size=13, bold=True, color=綠字 if not 要看 else 深字)
+    ws.row_dimensions[1].height = 26
+    ws.row_dimensions[4].height = 22
 
-    # 摘要
-    r = 4
-    for c, t in enumerate(("項目", "人數", "說明"), 1):
-        格 = ws.cell(r, c if c < 3 else 3, t)
-        格.font = Font(bold=True, color="FFFFFF"); 格.fill = PatternFill("solid", fgColor=奶茶); 格.alignment = 置中
-    ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=5)
-    for 類, 說 in 說明.items():
+    # ---- 每一區
+    r = 5
+    for 標題, 說, 色, 欄們, 列們_ in 區們:
+        r += 2
+        人數_ = len({n for v in 空白.values() for n in v}) if 標題.startswith("名冊、客戶都沒有") else len({x[0] for x in 列們_})
+        ws.cell(r, 1, f"■ {標題}（{人數_} 人）")
+        ws.cell(r, 1).font = Font(size=12, bold=True, color=色)
+        ws.cell(r, 4, 說).font = Font(size=9, color=灰字)
+        ws.cell(r, 4).alignment = Alignment(vertical="center")
+        ws.row_dimensions[r].height = 20
         r += 1
-        n = len(結果.get(類, []))
-        ws.cell(r, 1, 類); ws.cell(r, 2, n); ws.cell(r, 3, 說)
-        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=5)
-        for c in range(1, 6):
-            ws.cell(r, c).border = 框
-            ws.cell(r, c).alignment = 置中 if c == 2 else 換行
-        if n and 類 in 重要:
-            for c in range(1, 6):
-                ws.cell(r, c).fill = PatternFill("solid", fgColor=橘)
-            ws.cell(r, 1).font = Font(bold=True)
-        elif not n:
-            for c in range(1, 6):
-                ws.cell(r, c).font = Font(color=灰字)
-
-    # 明細
-    r += 2
-    表頭 = r
-    for c, t in enumerate(("項目", "姓名", "客戶資料", "人員名冊", "說明"), 1):
-        格 = ws.cell(r, c, t)
-        格.font = Font(bold=True, color="FFFFFF"); 格.fill = PatternFill("solid", fgColor=奶茶)
-        格.alignment = 置中; 格.border = 框
-    for 類 in 說明:
-        for i, 列 in enumerate(結果.get(類, [])):
+        c = 1
+        for 名, 佔 in 欄們:                              # 表頭
+            ws.cell(r, c, 名)
+            if 佔 > 1:
+                ws.merge_cells(start_row=r, start_column=c, end_row=r, end_column=c + 佔 - 1)
+            c += 佔
+        for cc in range(1, 最後欄 + 1):
+            格 = ws.cell(r, cc)
+            格.font = Font(size=10, bold=True, color="FFFFFF"); 格.fill = PatternFill("solid", fgColor=奶茶)
+            格.alignment = 置中; 格.border = 框
+        for k, 列 in enumerate(列們_):
             r += 1
-            n, 今, 舊, 說 = 列
-            for c, v in enumerate((類, n, 今, 舊, 說), 1):
-                格 = ws.cell(r, c, "" if v is None else v)
-                格.border = 框
-                格.alignment = 換行
-            if 類 in 重要 or str(說).startswith("⚠"):
-                for c in range(1, 6):
-                    ws.cell(r, c).fill = PatternFill("solid", fgColor=橘)
-            elif i % 2:
-                for c in range(1, 6):
-                    ws.cell(r, c).fill = PatternFill("solid", fgColor=淡奶茶)
-    if r > 表頭:
-        ws.auto_filter.ref = f"A{表頭}:E{r}"          # 表頭有篩選按鈕，可以只看某一類
-    ws.freeze_panes = f"A{表頭 + 1}"
-    ws.row_dimensions[1].height = 24
+            c = 1
+            for (名, 佔), v in zip(欄們, 列):
+                ws.cell(r, c, "" if v is None else v)
+                if 佔 > 1:
+                    ws.merge_cells(start_row=r, start_column=c, end_row=r, end_column=c + 佔 - 1)
+                c += 佔
+            長 = max((len(str(v or "")) / (sum(寬們[:佔]) / 1.6) for (_, 佔), v in zip(欄們, 列)), default=1)
+            ws.row_dimensions[r].height = 18 * max(1, int(長) + (1 if 長 % 1 else 0)) if 長 > 1 else 18
+            for cc in range(1, 最後欄 + 1):
+                格 = ws.cell(r, cc)
+                格.border = 框; 格.alignment = 靠左; 格.font = Font(size=10, color=深字)
+                if k % 2:
+                    格.fill = PatternFill("solid", fgColor=淡奶茶)
+            ws.cell(r, 1).font = Font(size=10, bold=True, color=深字)
+    if not 區們:
+        ws.cell(7, 1, "沒有要處理的地方 ✓").font = Font(size=12, color=綠字)
+
     ws.page_setup.orientation = "landscape"           # 列印：橫向、寬度縮成一頁
     ws.page_setup.fitToWidth, ws.page_setup.fitToHeight = 1, 0
     ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.print_title_rows = f"{表頭}:{表頭}"
 
 
 # ================================================================ 給客戶模組用：自己讀的資料
@@ -1315,9 +1361,10 @@ class 資料來源:
         self.列們 = []
 
     # 加一個人：名＝姓名；總額、自提、稅＝金額；證＝身分證；職＝職稱；編＝員工編號；執＝是不是執行業務
-    def 加(self, 名, 總額=0, 自提=0, 稅=0, 證="", 職="", 編="", 執=False):
+    def 加(self, 名, 總額=0, 自提=0, 稅=0, 證="", 職="", 編="", 執=False, 址=""):
         self.列們.append({"名": 清字(名), "編": 編號鍵(編), "金": {"總額": 數字(總額), "自提": 數字(自提), "稅": 數字(稅)},
-                        "執": bool(執), "職": 清字(職), "證": 清字(證).upper()})
+                        "執": bool(執), "職": 清字(職), "證": 清字(證).upper(),
+                        "址": str(址 or "").strip(), "編原": str(編 or "").strip()})
 
     # 核對：讀完後跟表上的合計比，對不起來會寫進匯入檢查
     def 對合計(self, 項目, 表上合計):
@@ -1326,7 +1373,7 @@ class 資料來源:
 
 
 # ================================================================ 主流程
-def 準備樣板(tpl, 新增欄, 要稅, 月份們=None):
+def 準備樣板(tpl, 新增欄, 要稅, 月份們=None, 額外列=()):
     wbo = openpyxl.load_workbook(tpl)
     ws = 樣板工作表(wbo)
     表頭列, _, 清冊欄 = 清冊欄位表(ws)
@@ -1336,19 +1383,22 @@ def 準備樣板(tpl, 新增欄, 要稅, 月份們=None):
             插入欄(ws, 位置, 名, 表頭列)
             位置 += 1
     樣 = 樣板(ws, 要稅)
-    樣.加獎金列(list(月份們 or {}))
+    樣.加獎金列(list(月份們 or {}) + [x for x in 額外列 if x not in (月份們 or {})])   # 額外列：例如每人多一列「伙食費」
     return wbo, ws, 樣
 
 
-def 執行(設, 輸出資料夾, 模組=None):
+# 分冊：客戶模組讀到的資料裡，有的要另外出一本清冊（例如 91-1 競技競賽及機會中獎）→ 資料來源設 .清冊＝名稱
+#   主清冊做完後，同一個 執行 再跑一次，只放那些資料，輸出成另一個檔
+def 執行(設, 輸出資料夾, 模組=None, 分冊=None):
     模組 = 模組 or 取模組(設.get("模組", "通用"))
     if 模組 is not None and hasattr(模組, "整理設定"):      # 客戶模組把自己的設定換成共用的讀法
         設 = 模組.整理設定(copy.deepcopy(設))
     自己讀 = 模組 is not None and hasattr(模組, "讀取")
     globals()["月薪金額詞"] = 拆詞(設.get("薪資總額", ""))[:1] or ["扣憑"]
     年 = int(設["年度"])
-    src, tpl = 設["薪資檔"], 設["樣板"]
-    if not src or not os.path.exists(src):
+    src, tpl = 設.get("薪資檔", ""), 設["樣板"]
+    多檔 = 自己讀 and getattr(模組, "多個薪資檔", False)     # 客戶模組自己選好幾個薪資檔（例如每月一個 Excel）
+    if not 多檔 and (not src or not os.path.exists(src)):
         raise SystemExit("請先選擇薪資檔")
     if not tpl or not os.path.exists(tpl):
         raise SystemExit("請先選擇清冊樣板")
@@ -1374,20 +1424,30 @@ def 執行(設, 輸出資料夾, 模組=None):
             月份們[清字(x[1])] = int(str(x[3]).replace("月", ""))
 
     # ---- 2. 讀薪資檔
-    if src.lower().endswith(".xls"):          # 舊版 .xls：只讀得到值（沒有公式）
+    if 多檔 or 分冊 is not None:              # 客戶模組在「讀取」裡自己開檔案；分冊用主清冊讀好的
+        wb = wbf = None
+    elif src.lower().endswith(".xls"):        # 舊版 .xls：只讀得到值（沒有公式）
         wb = wbf = 開活頁簿(src)
     else:
         wb = openpyxl.load_workbook(src, data_only=True)
         wbf = openpyxl.load_workbook(src)
-    名冊表, 名冊, 編號對照 = 讀名冊(wb)
+    名冊表, 名冊, 編號對照 = 讀名冊(wb) if wb is not None else (None, OrderedDict(), {})
     for 名 in 月份們:
         if 名 not in 清冊欄:
             raise SystemExit(f"獎金欄位「{名}」不在樣板裡")
-    if 自己讀:
+    if 分冊 is not None:
+        表們, 缺表, 警告 = list(分冊["表們"]), [], []
+    elif 自己讀:
         表們, 缺表, 警告 = 模組.讀取(設, 年, wb, wbf, 清冊欄)
     else:
         表們, 缺表, 警告 = 選表(wb, 設, 年, 清冊欄)
-    if not any(t.類型 == "月薪" for t in 表們):
+    分冊們 = OrderedDict()                     # 要另外出清冊的資料，先拿出來
+    if 分冊 is None:
+        for t in [t for t in 表們 if getattr(t, "清冊", None)]:
+            分冊們.setdefault(t.清冊, []).append(t)
+            表們.remove(t)
+    額外列 = list(dict.fromkeys(t.明細列 for t in 表們 if getattr(t, "明細列", None)))   # 每人多幾列（例如伙食費）
+    if 分冊 is None and not any(t.類型 == "月薪" for t in 表們):
         raise SystemExit(f"薪資檔裡找不到 {年} 年的月薪表（工作表名稱像「{表名(設['月薪表'], 年, 1)}」），"
                          f"請檢查客戶設定的「月薪表名稱」")
     原始 = []
@@ -1424,9 +1484,16 @@ def 執行(設, 輸出資料夾, 模組=None):
                 b["身分證號"] = 表上證[人]
             else:
                 if 備用證 is None:
-                    備用證 = 讀身分證(wb)
+                    備用證 = 讀身分證(wb) if wb is not None else {}
                 if 人 in 備用證:
                     b["身分證號"] = 備用證[人]
+    for t, x in 原始:                      # 客戶模組自己讀的（資料來源）：薪資表上有地址、編號的也記下來
+        b = 基本.get(歸戶(x["名"], x["編"]))
+        if b is not None and "址" in x:
+            if x["址"] and not b.get("地址"):
+                b["地址"] = x["址"]
+            if x["編原"] and not b.get("編號"):
+                b["編號"] = x["編原"]
 
     # ---- 5. 分到薪資／執行業務，並累計核對數字
     執行業務另開 = bool(設.get("執行業務另開"))
@@ -1443,8 +1510,13 @@ def 執行(設, 輸出資料夾, 模組=None):
         去執 = 執行業務另開 and (x["執"] or (t.類型 != "月薪" and 人 in 純執))
         目的 = 執行 if 去執 else 薪資
         d = 目的.setdefault(人, OrderedDict()).setdefault(t.欄位, {"總額": 0, "自提": 0, "稅": 0})
-        for k in d:
-            d[k] += x["金"][k]
+        列名 = getattr(t, "明細列", None)
+        if 列名:                                  # 放在自己那一列（例如伙食費），不算進薪資總額
+            d.setdefault("列", {})
+            d["列"][列名] = d["列"].get(列名, 0) + x["金"]["總額"]
+        else:
+            for k in ("總額", "自提", "稅"):
+                d[k] += x["金"][k]
         c = 核對.setdefault((t, "執行業務" if 去執 else "薪資"), {"人": set(), "總額": 0, "自提": 0, "稅": 0})
         c["人"].add(人)
         for k in ("總額", "自提", "稅"):
@@ -1488,7 +1560,7 @@ def 執行(設, 輸出資料夾, 模組=None):
             raise SystemExit(f"在「科目分類」這一步出錯：\n{type(e).__name__}: {e}")
 
     # ---- 6.5 人員名冊（選用）：清冊的編號、身分證號、地址改用名冊的；先用客戶的資料跟名冊核對
-    前年, 核, 用客戶 = None, None, []
+    前年, 核, 用客戶, 人列們 = None, None, [], []
     if 設.get("人員名冊"):
         if not os.path.exists(設["人員名冊"]):
             raise SystemExit(f"找不到人員名冊：{設['人員名冊']}")
@@ -1504,11 +1576,55 @@ def 執行(設, 輸出資料夾, 模組=None):
         for n in 薪放 + 執單:
             客資 = 基本.get(n, {})
             m = next((x for x in (顯示名.get(n, n), n) if x in 前年), None) or 依證.get(清字(客資.get("身分證號")).upper())
-            if m:
+            名 = 顯示名.get(n, n)
+            人列 = {"名": 名, "類": "薪資" if n in 薪放 else "執行業務", "找到": bool(m), "名冊名": m, "欄": {}, "問題": []}
+            人列們.append(人列)                 # 人員名冊核對工作表：一個人一列，記下每一欄填了什麼、從哪裡來
+            if m:                               # 名冊找得到：每一欄用名冊的；名冊那一欄空白才用客戶的
                 v = 前年[m]
-                基本[n] = {"編號": v.get("編號"), "身分證號": v.get("身分證號") or None, "地址": v.get("地址原") or None}
-            else:
-                用客戶.append(顯示名.get(n, n))
+                新 = {}
+                for 鍵, 名冊值 in (("編號", v.get("編號")), ("身分證號", v.get("身分證號")), ("地址", v.get("地址原"))):
+                    if 清字(名冊值):
+                        新[鍵] = 名冊值
+                        人列["欄"][鍵] = (名冊值, "名冊")
+                    elif 清字(客資.get(鍵)):
+                        新[鍵] = 客資[鍵]
+                        人列["欄"][鍵] = (客資[鍵], "客戶")
+                        人列["問題"].append(f"名冊上{鍵}空白，用客戶的")
+                        核["用客戶資料填寫"].append((名, 客資[鍵], "", f"{鍵}：名冊上這個人的{鍵}是空白，清冊填客戶的"))
+                    else:
+                        新[鍵] = None
+                        人列["欄"][鍵] = (None, "空白")
+                        if 鍵 != "編號":
+                            人列["問題"].append(f"{鍵}空白（名冊、客戶都沒有）")
+                基本[n] = 新
+            else:                               # 名冊找不到：整個人都用客戶的
+                用客戶.append(名)
+                for 鍵 in ("編號", "身分證號", "地址"):
+                    if 清字(客資.get(鍵)):
+                        人列["欄"][鍵] = (客資[鍵], "客戶")
+                        核["用客戶資料填寫"].append((名, 客資[鍵], "", f"{鍵}：名冊找不到這個人，清冊填客戶的"))
+                    else:
+                        人列["欄"][鍵] = (None, "空白")
+                        if 鍵 != "編號":            # 編號空白很常見，不用特別提醒
+                            人列["問題"].append(f"{鍵}空白（名冊、客戶都沒有）")
+                            核["用客戶資料填寫"].append((名, "", "", f"⚠ {鍵}：名冊找不到這個人，客戶也沒有，清冊空白"))
+        # 前年度核對找到的問題，放到每個人那一列的說明
+        依名 = {x["名"]: x for x in 人列們}
+        for 類, 列們_ in 核.items():
+            for 列 in 列們_:
+                x = 依名.get(列[0])
+                if x is None:
+                    continue
+                if 類 == "同身分證、名字不同":
+                    x["問題"].insert(0, f"名冊上的名字是「{列[2]}」（身分證一樣）")
+                elif 類 == "同名字、身分證不同":
+                    x["問題"].insert(0, f"身分證不同：客戶寫 {列[1]}，名冊是 {列[2]}（清冊用名冊的）")
+                elif 類 == "所得類別不同":
+                    x["問題"].insert(0, f"所得類別不同：{列[3]}")
+                elif 類 == "地址不同":
+                    x["問題"].insert(0, f"地址不同：客戶寫「{列[1]}」（清冊用名冊的）")
+                elif 類 == "名冊找不到" and 列[3]:
+                    x["問題"].insert(0, 列[3])
 
     # ---- 7. 填清冊
     輸出們 = []
@@ -1520,18 +1636,18 @@ def 執行(設, 輸出資料夾, 模組=None):
             科 = re.match(r"\d*", str(科目of.get(n, ""))).group(0)
             (組們.setdefault(科, []) if 科 else 沒科目).append(n)
         for 科 in sorted(組們):
-            wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們)
+            wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們, 額外列)
             編號們 = {n: f"{開頭[科]}{i + 1:02d}" for i, n in enumerate(組們[科])} if 科 in 開頭 else {}
             樣.填(組們[科], 薪資, 基本, 顯示名, 編號們, {n: 科 for n in 組們[科]}, 設.get("科目寫入欄", ""), 月份們)
             輸出們.append((os.path.join(輸出資料夾, f"{客}_{年}年薪資印領清冊_{科}.xlsx"), wbo, f"科目 {科}：{len(組們[科])} 人"))
         if 沒科目:
             警告.append("這些人的職稱沒有對應會計科目，沒有放進清冊：" + "、".join(顯示名.get(n, n) for n in 沒科目))
         if 執單:
-            wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們)
+            wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們, 額外列)
             樣.填(執單, 執行, 基本, 顯示名, 月份們=月份們)
             輸出們.append((os.path.join(輸出資料夾, f"{客}_{年}年執行業務印領清冊.xlsx"), wbo, f"執行業務：{len(執單)} 人"))
     else:
-        wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們)
+        wbo, ws, 樣 = 準備樣板(tpl, 新增欄, 要稅, 月份們, 額外列)
         ws執 = None
         if 執單:
             ws執 = wbo.copy_worksheet(ws)
@@ -1544,10 +1660,13 @@ def 執行(設, 輸出資料夾, 模組=None):
             樣執.__dict__.update(樣.__dict__)
             樣執.ws = ws執
             樣執.填(執單, 執行, 基本, 顯示名, 月份們=月份們)
-        輸出們.append((os.path.join(輸出資料夾, f"{客}_{年}年薪資印領清冊.xlsx"), wbo,
-                     f"薪資 {len(薪單)} 人" + (f"，執行業務 {len(執單)} 人" if 執單 else "")))
+        if 分冊 is not None and isinstance(ws["A1"].value, str):
+            ws["A1"].value = ws["A1"].value.replace("薪資印領清冊", 分冊["標題"])
+        冊名 = 分冊["名稱"] if 分冊 is not None else "薪資"
+        輸出們.append((os.path.join(輸出資料夾, f"{客}_{年}年{冊名}印領清冊.xlsx"), wbo,
+                     f"{冊名} {len(薪單)} 人" + (f"，執行業務 {len(執單)} 人" if 執單 else "")))
     for p, _, _ in 輸出們:
-        if os.path.abspath(p) in (os.path.abspath(tpl), os.path.abspath(src)):
+        if os.path.abspath(p) in [os.path.abspath(x) for x in [tpl, src] + list(設.get("薪資檔們", [])) if x]:
             raise SystemExit("輸出檔不能和薪資檔或樣板同一個檔案")
 
     # ---- 8. 匯入檢查
@@ -1645,20 +1764,21 @@ def 執行(設, 輸出資料夾, 模組=None):
     for p, wbo, _ in 輸出們:
         寫檢查(wbo)
         if 前年 is not None:
-            寫前年度核對(wbo, 核, 設["人員名冊"], len(前年))
+            寫前年度核對(wbo, 核, 設["人員名冊"], len(前年), 人列們)
         try:
             wbo.save(p)
         except PermissionError:
             raise SystemExit(f"無法存檔：{p}\n這個檔案可能正在 Excel 裡開著，請先關掉再執行一次。")
 
     # ---- 9. 摘要
-    月份 = [t.工作表.strip() for t in 表們 if t.類型 == "月薪" and t.欄位 in 中文月]
+    月份 = [t.工作表.strip() for t in 表們 if t.類型 == "月薪" and t.欄位 in 中文月 and not getattr(t, "併入", False)]
     摘要 = [f"輸出資料夾：{輸出資料夾}"]
     if 分類檔:
         摘要.append(f"・{os.path.basename(分類檔)}：{len(分類表)} 張表插入科目計算表")
     摘要 += [f"・{os.path.basename(p)}：{說}" for p, _, 說 in 輸出們]
     摘要.append("")
-    摘要.append(f"月薪表：{月份[0]}～{月份[-1]} 共 {len(月份)} 張" if 月份 else "月薪表：0 張")
+    if 分冊 is None:
+        摘要.append(f"月薪表：{月份[0]}～{月份[-1]} 共 {len(月份)} 張" if 月份 else "月薪表：0 張")
     不符 = [t.顯示名稱 for t in 表們 if any(abs(a - b) > 1 for _, a, b in getattr(t, "核對", []))]
     有核 = [t for t in 表們 if getattr(t, "核對", None)]
     if 有核:
@@ -1681,8 +1801,12 @@ def 執行(設, 輸出資料夾, 模組=None):
     if 前年 is not None:
         摘要 += ["", f"人員名冊：清冊的編號、身分證、地址 {len(薪放) + len(執單) - len(用客戶)} 人用名冊"
                  + (f"，{len(用客戶)} 人名冊找不到（用客戶的資料）" if 用客戶 else ""),
-                 "人員名冊核對：" + ("、".join(f"{k} {len(v)} 人" for k, v in 核.items() if v) or "全部一致 ✓")]
+                 "人員名冊核對：" + ("、".join(f"{k} {len({x[0] for x in v})} 人" for k, v in 核.items() if v) or "全部一致 ✓")]
     摘要.append("\n詳細內容請看輸出檔的「匯入檢查」" + ("、「人員名冊核對」" if 前年 is not None else "") + "工作表。")
+    for 名, ts in 分冊們.items():                # 另外的清冊（例如 91-1）
+        標題 = getattr(ts[0], "清冊標題", None) or f"{名}印領清冊"
+        子 = globals()["執行"](設, 輸出資料夾, 模組, {"名稱": 名, "標題": 標題, "表們": ts})   # 這個函式裡「執行」是別的變數
+        摘要 += ["", f"────── {名} ──────"] + [x for x in 子.split("\n") if not x.startswith("輸出資料夾")]
     return "\n".join(摘要)
 
 
@@ -1915,12 +2039,14 @@ def 主視窗():
     卡 = 卡片(檔頁)
     卡.columnconfigure(1, weight=1)
     薪資檔變數, 樣板變數, 年變數 = tk.StringVar(), tk.StringVar(), tk.StringVar()
-    標籤(卡, "薪資檔").grid(row=0, column=0, sticky="w", padx=(0, 14), pady=4)
+    薪資檔列 = [標籤(卡, "薪資檔")]
+    薪資檔列[0].grid(row=0, column=0, sticky="w", padx=(0, 14), pady=4)
     框, e = 輸入框(卡, 薪資檔變數)
     框.grid(row=0, column=1, sticky="ew", pady=4)
     顯示檔名(e, 薪資檔變數)
-    按鈕(卡, "選擇…", lambda: 選檔案(薪資檔變數, "選擇這個客戶的薪資檔", 載入薪資檔,
-                                                       [("Excel 檔案", "*.xlsx *.xlsm *.xls"), ("所有檔案", "*.*")])).grid(row=0, column=2, sticky="ew", padx=(8, 0))
+    薪資檔列 += [框, 按鈕(卡, "選擇…", lambda: 選檔案(薪資檔變數, "選擇這個客戶的薪資檔", 載入薪資檔,
+                                                       [("Excel 檔案", "*.xlsx *.xlsm *.xls"), ("所有檔案", "*.*")]))]
+    薪資檔列[2].grid(row=0, column=2, sticky="ew", padx=(8, 0))
     標籤(卡, "清冊樣板").grid(row=1, column=0, sticky="w", padx=(0, 14), pady=4)
     框, e = 輸入框(卡, 樣板變數)
     框.grid(row=1, column=1, sticky="ew", pady=4)
@@ -2073,6 +2199,9 @@ def 主視窗():
         會換行[:] = [(w, x) for w, x in 會換行 if w.winfo_exists()]
         m = 取模組(設.get("模組", "通用"))
         模組說明.configure(text=f"讀法：{getattr(m, '名稱', 設.get('模組', ''))}" if m else "✗ 找不到客戶模組")
+        狀態["多檔"] = bool(getattr(m, "多個薪資檔", False))
+        for w in 薪資檔列:                       # 客戶模組自己選好幾個薪資檔時，不顯示這一列
+            (w.grid_remove if 狀態["多檔"] else w.grid)()
         年變數.set(str(設.get("年度", 115)))
         薪資檔變數.set(設.get("薪資檔", "")); 樣板變數.set(設.get("樣板", "")); 名冊變數.set(設.get("人員名冊", ""))
         狀態["外掛"] = {}
@@ -2236,7 +2365,8 @@ def 主視窗():
     def 更新側欄():
         try:
             年 = 目前年()
-            有檔 = bool(薪資檔變數.get()) and os.path.exists(薪資檔變數.get()) and bool(樣板變數.get()) and os.path.exists(樣板變數.get())
+            有檔 = (狀態.get("多檔") or (bool(薪資檔變數.get()) and os.path.exists(薪資檔變數.get()))) \
+                and bool(樣板變數.get()) and os.path.exists(樣板變數.get())
             if "檔案" in 選單:
                 選單["檔案"]["狀"].configure(text=("✓ " if 有檔 else "✗ 還沒選檔案｜") + (f"{年} 年" if 年 else "年度？"),
                                            fg=OK_COLOR if 有檔 else ERR_COLOR)
